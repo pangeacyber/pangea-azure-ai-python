@@ -707,7 +707,7 @@ wheels = [
 
 [[package]]
 name = "pangea-azure-ai"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "azure-ai-inference" },

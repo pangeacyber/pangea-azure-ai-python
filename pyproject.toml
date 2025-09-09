@@ -1,6 +1,6 @@
 [project]
 name = "pangea-azure-ai"
-version = "0.0.0"
+version = "0.1.0"
 description = "A wrapper around the Azure AI Inference SDK"
 readme = "README.md"
 license = "MIT"
