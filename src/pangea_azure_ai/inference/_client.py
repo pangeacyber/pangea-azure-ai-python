@@ -5,7 +5,7 @@ from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from azure.ai.inference import ChatCompletionsClient
 from azure.ai.inference import models as _models
 from azure.core.credentials import AzureKeyCredential, TokenCredential
-from pangea.services import AIGuard
+from pangea.services import AIGuard, Redact
 from pangea.services.ai_guard import Message as PangeaMessage
 from pangea.services.ai_guard import PromptMessage
 from typing_extensions import IO, Any, Dict, List, Literal, Optional, Union, overload, override
@@ -61,11 +61,22 @@ def normalize_content(content: str | Sequence[_models.ContentItem] | None) -> st
 
 
 def to_azure_messages(messages: Sequence[PromptMessage]) -> list[_models.ChatRequestMessage]:
-    return [_models.ChatRequestMessage(**message.model_dump()) for message in messages]
+    result: list[_models.ChatRequestMessage] = []
+    for message in messages:
+        if message.role == "system":
+            result.append(_models.SystemMessage(content=message.content))
+        elif message.role == "user":
+            result.append(_models.UserMessage(content=message.content))
+        elif message.role == "assistant":
+            result.append(_models.AssistantMessage(content=message.content))
+        else:
+            raise ValueError(f"Unknown message role: {message.role}")
+    return result
 
 
 class PangeaChatCompletionsClient(ChatCompletionsClient):
     ai_guard_client: AIGuard
+    redact_client: Redact
     pangea_input_recipe: str | None = None
     pangea_output_recipe: str | None = None
 
@@ -112,6 +123,7 @@ class PangeaChatCompletionsClient(ChatCompletionsClient):
             **kwargs,
         )
         self.ai_guard_client = AIGuard(token=pangea_api_key)
+        self.redact_client = Redact(token=pangea_api_key)
         self.pangea_input_recipe = pangea_input_recipe
         self.pangea_output_recipe = pangea_output_recipe
 
@@ -497,9 +509,19 @@ class PangeaChatCompletionsClient(ChatCompletionsClient):
         if not isinstance(azure_response, _models.ChatCompletions):
             return azure_response
 
+        output_messages = [PangeaMessage(role="assistant", content=azure_response.choices[0].message.content)]
+
+        # FPE decryption.
+        if guard_input_response.result.fpe_context is not None:
+            redact_response = self.redact_client.unredact(
+                output_messages,
+                fpe_context=guard_input_response.result.fpe_context,
+            )
+            assert redact_response.result is not None
+            output_messages = redact_response.result.data
+
         guard_output_response = self.ai_guard_client.guard_text(
-            messages=pangea_messages
-            + [PangeaMessage(role="assistant", content=azure_response.choices[0].message.content)],
+            messages=pangea_messages + output_messages,
             recipe=self.pangea_output_recipe,
         )
 
@@ -510,5 +532,7 @@ class PangeaChatCompletionsClient(ChatCompletionsClient):
 
         if guard_output_response.result.transformed and guard_output_response.result.prompt_messages is not None:
             azure_response.choices[0].message.content = guard_output_response.result.prompt_messages[-1].content
+        elif guard_input_response.result.fpe_context is not None:
+            azure_response.choices[0].message.content = output_messages[-1].content
 
         return azure_response
